@@ -174,10 +174,10 @@ Git.
 
 ## Release Package
 
-The GitHub release provides a Windows executable asset. Download the release
-asset, place it wherever you prefer, and run `Voxora.exe`.
+The GitHub release provides a Windows installer. Download
+`VoxoraSetup-1.0.0.exe`, run it, and follow the installer prompts.
 
-`ffmpeg` and `yt-dlp` are not bundled in the release asset. Install them
+`ffmpeg` and `yt-dlp` are not bundled in the installer. Install them
 separately when you need video conversion or URL transcription.
 
 ## Project Structure
@@ -190,6 +190,8 @@ separately when you need video conversion or URL transcription.
 │       └── icon.png
 ├── script.py
 ├── Voxora.spec
+├── installer/
+│   └── Voxora.iss
 ├── requirements.txt
 ├── README.md
 └── LICENSE
@@ -249,6 +251,7 @@ pip install -r requirements.txt
 - The app entry point is `script.py`.
 - The app icon is loaded from `assets/img/icon.ico`.
 - `Voxora.spec` configures the PyInstaller build.
+- `installer/Voxora.iss` configures the Windows installer build.
 - The app uses `QSettings("neura", "Voxora")` for user settings.
 - Transcription history is local runtime data and should not be committed.
 
