@@ -254,6 +254,10 @@ UI_TEXT: Dict[str, Dict[str, str]] = {
         "err_transcription": "Transcription error",
         "toolbar_cancel": "Cancel",
         "toolbar_terminal": "Terminal",
+        "toolbar_copy_logs": "Copy session logs",
+        "toolbar_copy_logs_tip": "Copy the current session logs to the clipboard",
+        "msg_logs_copied": "Session logs copied to the clipboard.",
+        "msg_no_logs": "There are no session logs to copy.",
         "label_url": "URL:",
         "btn_transcribe_url": "Transcribe URL",
         "group_url": "Transcribe from URL (YouTube / Bilibili)",
@@ -315,6 +319,10 @@ UI_TEXT: Dict[str, Dict[str, str]] = {
         "err_transcription": "Error de transcripción",
         "toolbar_cancel": "Cancelar",
         "toolbar_terminal": "Terminal",
+        "toolbar_copy_logs": "Copiar logs de sesión",
+        "toolbar_copy_logs_tip": "Copiar al portapapeles los logs de la sesión actual",
+        "msg_logs_copied": "Logs de sesión copiados al portapapeles.",
+        "msg_no_logs": "No hay logs de sesión para copiar.",
         "label_url": "URL:",
         "btn_transcribe_url": "Transcribir URL",
         "group_url": "Transcribir desde URL (YouTube / Bilibili)",
@@ -376,6 +384,10 @@ UI_TEXT: Dict[str, Dict[str, str]] = {
         "err_transcription": "转写错误",
         "toolbar_cancel": "取消",
         "toolbar_terminal": "终端",
+        "toolbar_copy_logs": "复制会话日志",
+        "toolbar_copy_logs_tip": "将当前会话日志复制到剪贴板",
+        "msg_logs_copied": "会话日志已复制到剪贴板。",
+        "msg_no_logs": "没有可以复制的会话日志。",
         "label_url": "URL:",
         "btn_transcribe_url": "转写链接",
         "group_url": "从链接转写 (YouTube / Bilibili)",
@@ -2397,6 +2409,8 @@ class MainWindow(QMainWindow):
             self.toolbar.setWindowTitle("Voxora")
             self.cancel_action.setText(ui_tr(self.ui_lang, "toolbar_cancel"))
             self.toggle_terminal_action.setText(ui_tr(self.ui_lang, "toolbar_terminal"))
+            self.copy_logs_action.setText(ui_tr(self.ui_lang, "toolbar_copy_logs"))
+            self.copy_logs_action.setStatusTip(ui_tr(self.ui_lang, "toolbar_copy_logs_tip"))
         except Exception:
             pass
 
@@ -2688,6 +2702,11 @@ class MainWindow(QMainWindow):
         self.toggle_terminal_action.setChecked(False)
         self.toggle_terminal_action.setStatusTip("Mostrar u ocultar la terminal de logs")
         self.toolbar.addAction(self.toggle_terminal_action)
+        # Copy logs without requiring the optional terminal panel to be visible.
+        self.copy_logs_action = QAction(ui_tr(self.ui_lang, "toolbar_copy_logs"), self)
+        self.copy_logs_action.setStatusTip(ui_tr(self.ui_lang, "toolbar_copy_logs_tip"))
+        self.copy_logs_action.setEnabled(False)
+        self.toolbar.addAction(self.copy_logs_action)
 
         # Tabs: one for transcription, one for history
         self.tabs = QTabWidget(self)
@@ -2935,6 +2954,7 @@ class MainWindow(QMainWindow):
         self.cancel_action.triggered.connect(self._cancel_transcription)
         # Terminal toggle
         self.toggle_terminal_action.toggled.connect(self._set_terminal_visible)
+        self.copy_logs_action.triggered.connect(self._copy_session_logs)
         # Drag/drop events
         self.drop_widget.files_dropped.connect(self._handle_dropped_files)
         self.drop_widget.clicked.connect(self._open_file_dialog)
@@ -3407,6 +3427,7 @@ class MainWindow(QMainWindow):
                 pass
             self.text_edit.clear()
             self.terminal.clear()
+            self.copy_logs_action.setEnabled(False)
             self.copy_button.setEnabled(False)
             self.translate_button.setEnabled(False)
             self.progress_bar.setRange(0, 100)
@@ -3499,6 +3520,7 @@ class MainWindow(QMainWindow):
     def _append_terminal_line(self, line: str) -> None:
         # QPlainTextEdit is efficient for large logs and provides a terminal-like feel.
         self.terminal.appendPlainText(line)
+        self.copy_logs_action.setEnabled(bool(self.terminal.toPlainText().strip()))
 
         # Make long operations clearer via the status bar.
         # This only changes the UI message, not the processing logic.
@@ -3564,6 +3586,15 @@ class MainWindow(QMainWindow):
     def _copy_current_transcript(self) -> None:
         """Copy current transcript to clipboard."""
         QGuiApplication.clipboard().setText(self.text_edit.toPlainText())
+
+    def _copy_session_logs(self) -> None:
+        """Copy the complete current-session log, even when the panel is hidden."""
+        logs = self.terminal.toPlainText()
+        if not logs.strip():
+            self.statusBar().showMessage(ui_tr(self.ui_lang, "msg_no_logs"), 5000)
+            return
+        QGuiApplication.clipboard().setText(logs)
+        self.statusBar().showMessage(ui_tr(self.ui_lang, "msg_logs_copied"), 5000)
 
     def _populate_history_list(self) -> None:
         """Refresh the QListWidget with the current history entries."""
