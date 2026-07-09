@@ -1,5 +1,5 @@
 #define MyAppName "Voxora"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "neura-neura"
 #define MyAppURL "https://github.com/neura-neura/voxora"
 #define MyAppExeName "Voxora.exe"

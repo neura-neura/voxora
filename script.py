@@ -44,6 +44,7 @@ import os
 import sys
 import tempfile
 import re
+import subprocess
 import threading
 import time
 import shutil
@@ -598,6 +599,99 @@ def is_video_file(path: Path) -> bool:
     return path.suffix.lower() in video_exts
 
 
+def extract_video_audio_to_wav(input_path: Path, output_path: Path) -> tuple[bool, str]:
+    """Extract the first audio stream from a video as 16 kHz mono PCM WAV.
+
+    The old extraction path let FFmpeg's numeric exit status reach the user.
+    In particular, silent videos cause FFmpeg to exit with ``-22`` on Windows.
+    Detect that case before invoking FFmpeg, and return an actionable message
+    instead.  The returned text is intended for the UI and also includes the
+    FFmpeg diagnostics for other conversion failures.
+    """
+    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+    # ffprobe is included with normal FFmpeg installs.  Checking it first avoids
+    # trying to create a WAV from a video that simply has no audio track.
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path:
+        try:
+            probe = subprocess.run(
+                [
+                    ffprobe_path,
+                    "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=index",
+                    "-of", "csv=p=0",
+                    str(input_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creation_flags,
+            )
+            if probe.returncode == 0 and not (probe.stdout or "").strip():
+                return False, (
+                    "El video no contiene una pista de audio, por lo que no se puede transcribir. "
+                    "Elige un video con audio o agrega una pista de audio antes de intentarlo de nuevo."
+                )
+        except OSError:
+            # Fall back to FFmpeg below. Its output is also checked for a
+            # missing-audio-stream error in case ffprobe cannot be started.
+            pass
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(input_path),
+        "-map", "0:a:0",
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(
+            ffmpeg_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+        )
+    except FileNotFoundError:
+        return False, "No se encontró ffmpeg en PATH. Instálalo o agrégalo a las variables de entorno."
+    except OSError as exc:
+        return False, f"No se pudo iniciar ffmpeg: {exc}"
+
+    if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 44:
+        return True, ""
+
+    details = (result.stdout or "").strip()
+    details_lower = details.lower()
+    no_audio_markers = (
+        "matches no streams",
+        "does not contain any stream",
+        "output file #0 does not contain any stream",
+    )
+    if any(marker in details_lower for marker in no_audio_markers):
+        return False, (
+            "El video no contiene una pista de audio, por lo que no se puede transcribir. "
+            "Elige un video con audio o agrega una pista de audio antes de intentarlo de nuevo."
+        )
+
+    tail = "\n".join(details.splitlines()[-20:])
+    message = "No se pudo extraer el audio del video con ffmpeg."
+    if tail:
+        message += f"\n\nÚltimas líneas de ffmpeg:\n{tail}"
+    return False, message
+
+
 @dataclass
 class TranscriptEntry:
     """Represents a single transcript entry in the history."""
@@ -909,7 +1003,10 @@ class TranscriptionWorker(QObject):
 
         try:
             model_size = self.model_size or DEFAULT_MODEL_SIZE
-            model = get_whisper_model(model_size=model_size, models_dir=self.models_dir)
+            # Delay loading the (potentially large) model until a usable audio
+            # source has been prepared. This lets us reject a silent video
+            # immediately instead of downloading/loading a model first.
+            model = None
 
             total_files = len(self.paths)
             processed_files = 0
@@ -1008,32 +1105,15 @@ class TranscriptionWorker(QObject):
                     audio_path = Path(tmp_name)
                     created_temp_audio = True
 
-                    cmd = [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(path),
-                        "-vn",
-                        "-ac",
-                        "1",
-                        "-ar",
-                        "16000",
-                        "-f",
-                        "wav",
-                        str(audio_path),
-                    ]
-                    log_line(f"[DEBUG] Extracting audio with command: {' '.join(cmd)}")
-
-                    try:
-                        subprocess.run(
-                            cmd,
-                            check=True,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.STDOUT,
-                        )
+                    log_line(f"[DEBUG] Extracting audio from video: {path}")
+                    extracted, error_msg = extract_video_audio_to_wav(path, audio_path)
+                    if extracted:
                         log_line(f"[DEBUG] Audio extracted to: {audio_path}")
-                    except Exception as exc:
-                        error_msg = f"Error extracting audio with ffmpeg: {exc}"
+                    else:
+                        try:
+                            audio_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                         log_line(f"[ERROR] {error_msg}")
                         self.error.emit(error_msg)
                         return
@@ -1043,6 +1123,9 @@ class TranscriptionWorker(QObject):
 
                 if audio_path is None:
                     continue
+
+                if model is None:
+                    model = get_whisper_model(model_size=model_size, models_dir=self.models_dir)
 
                 # Start reading whisper.cpp progress from stderr (redirected to a pipe)
                 # so we can update the progress bar in real time.
