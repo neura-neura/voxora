@@ -1001,6 +1001,48 @@ class TranscriptionWorker(QObject):
             except Exception:
                 return False
 
+        def _audio_duration_seconds(p: Path) -> float:
+            """Return an audio duration without depending on Whisper logs.
+
+            All converted inputs are PCM WAV files, so ``wave`` is normally
+            enough.  ``ffprobe`` is only a fallback for valid WAV variants that
+            Python's ``wave`` module cannot read.
+            """
+            try:
+                with wave.open(str(p), "rb") as wf:
+                    rate = wf.getframerate()
+                    frames = wf.getnframes()
+                if rate > 0 and frames >= 0:
+                    return frames / float(rate)
+            except Exception:
+                pass
+
+            try:
+                if shutil.which("ffprobe"):
+                    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    probe = subprocess.run(
+                        [
+                            "ffprobe",
+                            "-v", "error",
+                            "-show_entries", "format=duration",
+                            "-of", "default=noprint_wrappers=1:nokey=1",
+                            str(p),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="ignore",
+                        creationflags=creation_flags,
+                    )
+                    if probe.returncode == 0:
+                        duration = float((probe.stdout or "").strip())
+                        if duration > 0:
+                            return duration
+            except Exception:
+                pass
+            return 0.0
+
         try:
             model_size = self.model_size or DEFAULT_MODEL_SIZE
             # Delay loading the (potentially large) model until a usable audio
@@ -1128,8 +1170,12 @@ class TranscriptionWorker(QObject):
                     model = get_whisper_model(model_size=model_size, models_dir=self.models_dir)
 
                 # Start reading whisper.cpp progress from stderr (redirected to a pipe)
-                # so we can update the progress bar in real time.
+                # as a fallback. The main progress source is the segment callback:
+                # unlike stderr, it works in PyInstaller --windowed builds where
+                # there is no visible terminal.
                 last_overall_pct = -1
+                progress_lock = threading.Lock()
+                audio_duration = _audio_duration_seconds(audio_path)
                 stop_evt = threading.Event()
                 pipe_r, pipe_w = os.pipe()
                 try:
@@ -1142,8 +1188,47 @@ class TranscriptionWorker(QObject):
                 progress_re = re.compile(rb"Progress:\s*(\d+)%")
                 attempt_no = 1
 
-                def reader_loop(file_index_done: int) -> None:
+                def emit_file_progress(file_pct: int) -> None:
+                    """Map the current file's percentage to the whole batch."""
                     nonlocal last_overall_pct
+                    file_pct = max(0, min(100, int(file_pct)))
+                    denom = max(total_files, 1)
+                    overall = int(
+                        100 * ((processed_files + (file_pct / 100.0)) / denom)
+                    )
+                    # Reserve the final 100% update for a completed transcription.
+                    if overall > 99:
+                        overall = 99
+                    with progress_lock:
+                        if overall == last_overall_pct:
+                            return
+                        last_overall_pct = overall
+                    self.progress.emit(overall)
+
+                def on_new_segment(segment: object) -> None:
+                    """Update progress from Whisper's decoded segment timestamps.
+
+                    ``Segment.t1`` is measured in 10 ms units.  This callback
+                    is invoked by pywhispercpp during inference and does not use
+                    stdout/stderr, which makes it reliable in the installed GUI.
+                    """
+                    if audio_duration <= 0:
+                        return
+                    try:
+                        end_seconds = int(getattr(segment, "t1", 0)) / 100.0
+                        emit_file_progress(int((end_seconds / audio_duration) * 100))
+                    except Exception:
+                        pass
+
+                if audio_duration > 0:
+                    log_line(
+                        f"[DEBUG] Real-time progress uses Whisper segment callbacks "
+                        f"(audio duration: {audio_duration:.1f}s)"
+                    )
+                else:
+                    log_line("[WARN] Could not determine audio duration; using Whisper log progress only")
+
+                def reader_loop() -> None:
                     buf = b""
                     while not stop_evt.is_set():
                         try:
@@ -1173,24 +1258,14 @@ class TranscriptionWorker(QObject):
                                         file_pct = int(m.group(1))
                                     except Exception:
                                         continue
-                                    # Overall progress across multiple files
-                                    denom = max(total_files, 1)
-                                    overall = int(
-                                        100
-                                        * ((file_index_done + (file_pct / 100.0)) / denom)
-                                    )
-                                    if overall > 99:
-                                        overall = 99
-                                    if overall != last_overall_pct:
-                                        last_overall_pct = overall
-                                        self.progress.emit(overall)
+                                    emit_file_progress(file_pct)
                         except BlockingIOError:
                             time.sleep(0.05)
                         except Exception:
                             break
 
                 t_reader = threading.Thread(
-                    target=reader_loop, args=(processed_files,), daemon=True
+                    target=reader_loop, daemon=True
                 )
                 t_reader.start()
 
@@ -1212,6 +1287,7 @@ class TranscriptionWorker(QObject):
                             "language": language_param,
                             "print_progress": True,
                             "print_realtime": False,
+                            "new_segment_callback": on_new_segment,
                         }
                         if self.translate_to_en:
                             params["translate"] = True
