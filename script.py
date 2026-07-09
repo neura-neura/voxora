@@ -1319,19 +1319,17 @@ class TranscriptionWorker(QObject):
                         log_line("[WARN] Detected repetition loop; retrying with no_context=True and temperature=0.2")
                         attempt_no = 2
                         log_line("[INFO] Reintento: iniciando intento 2 (el progreso se reinicia)")
-                        try:
-                            # Reset to baseline for this file so the progress bar doesn't look 'stuck at 99%'.
-                            base = int(100 * (processed_files / max(total_files, 1)))
-                            if base < 0:
-                                base = 0
-                            if base > 99:
-                                base = 99
-                            self.progress.emit(base)
-
-                            segments = _transcribe_once({"no_context": True, "temperature": 0.2, "beam_size": 5})
-                        except Exception as _exc2:
-                            log_line(f"[WARN] Retry with beam_size failed ({_exc2}); retrying with no_context=True only")
-                            segments = _transcribe_once({"no_context": True, "temperature": 0.2})
+                        # ``beam_size`` is not exposed by pywhispercpp's
+                        # parameter object. Retry only with options supported
+                        # by the installed binding instead of raising once
+                        # before the real retry starts.
+                        base = int(100 * (processed_files / max(total_files, 1)))
+                        if base < 0:
+                            base = 0
+                        if base > 99:
+                            base = 99
+                        self.progress.emit(base)
+                        segments = _transcribe_once({"no_context": True, "temperature": 0.2})
 
                     log_line(f"[DEBUG] Transcription completed for {audio_path}")
 
